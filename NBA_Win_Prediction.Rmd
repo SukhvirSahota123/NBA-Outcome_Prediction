@@ -1,0 +1,140 @@
+---
+title: "NBA Win Prediction"
+author: "Sukhvir Sahota"
+date: "2025-06-19"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+#Load libraries
+library(tidyverse)
+library(pROC)
+library(randomForest)
+library(broom)
+
+set.seed(400)
+```
+
+```{r load_data}
+#Import data set and remove index column & missing values 
+nba <- read.csv("NBA-BoxScores-2023-2024.csv") %>% 
+  select(-X) %>% 
+  na.omit()
+```
+
+```{r aggregate_team_stats}
+#Summarize player stats to team level performance for each game
+team_game <- nba %>% 
+  group_by(GAME_ID, TEAM_ABBREVIATION) %>% 
+  summarise(
+    team_pts = sum(PTS),
+    team_reb = sum(REB),
+    team_ast = sum(AST),
+    team_to = sum(TO),
+    team_pm = sum(PLUS_MINUS),
+    team_stl  = sum(STL, na.rm = TRUE),  
+    team_blk  = sum(BLK, na.rm = TRUE),   
+    team_pf   = sum(PF,  na.rm = TRUE),   
+    FG_pct = ifelse(sum(FGA, na.rm = TRUE) > 0, 
+                    sum(FGM, na.rm = TRUE) / sum(FGA, na.rm = TRUE),
+                    NA_real_),
+    FT_pct = ifelse(sum(FTA, na.rm = TRUE) > 0, 
+                    sum(FTM, na.rm = TRUE) / sum(FTA, na.rm = TRUE),
+                    NA_real_),
+    .groups = "drop") %>%
+  mutate(Result = ifelse(team_pm > 0, "W", "L") )
+```
+
+```{r prepare_ml_dataset}
+#Prepare data set for Random Forest & Logistic Regression: remove identifiers &
+#leakage columns
+ml_df <- team_game %>% 
+  mutate(Result = factor(Result, levels = c("L", "W"))) %>% 
+  select(-GAME_ID, -TEAM_ABBREVIATION, -team_pm) %>% #Prevents leakage
+  drop_na()
+```
+
+```{r k_fold_cv_logist_RF, message=FALSE}
+#k-fold CV for Logistic and RF using feature importance 
+k <- 5
+N <- 6 #Number of top features
+folds <- sample(rep(1:k, length.out = nrow(ml_df)))
+
+accs_rf <- aucs_rf <- c()
+accs_log <- aucs_log <- c()
+
+for (i in 1:k) {
+  train_fold <- ml_df[folds != i, ]
+  test_fold <- ml_df[folds == i, ]
+  
+  #Feature selection from RF trained on training fold
+  rf_temp <- randomForest(Result ~., data = train_fold, ntree = 500,
+                          importance = TRUE)
+  imp <- importance(rf_temp)[, "MeanDecreaseGini"]
+  
+  #Store feature importance from current iteration
+  if (i == 1) {
+    imp_matrix <- data.frame(Feature =  names(imp), Importance = imp, Fold = i)
+  } else {
+    imp_matrix <- rbind(imp_matrix, 
+                        data.frame(Feature = names(imp), Importance = imp, 
+                                   Fold = i))
+    
+  }
+  top_feats <- names(sort(imp, decreasing = TRUE))[1:N]
+  
+  #Random Forest with top N features 
+  f_rf <- as.formula(paste("Result ~", paste(top_feats, collapse = " + ")))
+  rf_fit <- randomForest(f_rf, data = train_fold, ntree = 500)
+  prob_rf <- predict(rf_fit, test_fold, type = "prob")[, "W"]
+  pred_rf <- ifelse(prob_rf >= 0.5, "W", "L")
+  accs_rf[i] <- mean(pred_rf == test_fold$Result)
+  aucs_rf[i] <- as.numeric(pROC::auc(test_fold$Result, prob_rf))
+  
+  #Logistic regression with top N features 
+  f_log <- as.formula(paste("Result ~", paste(top_feats, collapse = " + ")))
+  log_fit <- glm(f_log, data = train_fold, family = binomial())
+  prob_log <- predict(log_fit, test_fold, type = "response")
+  pred_log <- ifelse(prob_log >= 0.5, "W", "L")
+  accs_log[i] <- mean(pred_log == test_fold$Result)
+  aucs_log[i] <- as.numeric(pROC::auc(test_fold$Result, prob_log))
+  
+}
+
+#Average of important features
+avg_imp <- imp_matrix %>% 
+  group_by(Feature) %>% 
+  summarise(MeanImportance = mean(Importance, na.rm = TRUE)) %>% 
+  arrange(desc(MeanImportance))
+
+avg_imp
+                            
+```
+
+```{r feature_importance_plot}
+#Plotting average feature importance
+ggplot(avg_imp[1:9, ], aes(x = reorder(Feature, MeanImportance), 
+                            y = MeanImportance, fill = MeanImportance)) +
+         geom_col(show.legend = FALSE) + coord_flip() +
+         labs(title = "Average Feature Importance (Random Forest, CV Folds)",
+              x = "Feature", y = "Mean Decrease Gini")
+```
+
+```{r comparing_model_performance}
+#Model performances
+compare <- tibble(
+  Model = c("Random Forest", "Logistic Regression"),
+  Accuracy = c(mean(accs_rf), mean(accs_log)),
+  AUC = c(mean(aucs_rf), mean(aucs_log))
+)
+
+comp_long <- compare %>% 
+  pivot_longer(cols = -Model, names_to = "Metric", values_to  = "Value")
+
+comp_long
+
+ggplot(comp_long, aes(x = Model, y = Value, fill = Metric)) +
+  geom_col(position = "dodge") + labs(
+    title = "Cross-Validated Model Performance Comparison", y = "Score")
+
+```
