@@ -1,5 +1,6 @@
 # NBA_Outcome_Prediction
 This project analyzes NBA box score data from the 2023-2024 season to predict whether a team won or lost a game, based on its team-level performance statistics.
+This project contains a file for the raw data set provided by Kaggle, as well as an RMD file knitted to HTML which provides a visual on all outputs and graphs, and a non-knitted RMD file.
 
 This starts by aggregating player-level box score stats into team-level summaries for each game. Then additional features such as field goal percentage (FG%) and free throw percentage (FT%) are calculated to better capture team efficiency. 
 
